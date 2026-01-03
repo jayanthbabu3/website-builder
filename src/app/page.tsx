@@ -1,12 +1,30 @@
 "use client";
 
-import { useState, useRef, useEffect, lazy, Suspense, useMemo } from "react";
+import { useState, useRef, useEffect, lazy, Suspense, useMemo, useCallback } from "react";
 import { getExpandedProjectFiles } from "@/lib/webcontainer-files";
 
 // Lazy load WebContainerPreview to avoid SSR issues
 const WebContainerPreview = lazy(
   () => import("@/components/WebContainerPreview")
 );
+
+// Lazy load CodeEditor to avoid SSR issues with CodeMirror
+const CodeEditor = lazy(() => import("@/components/CodeEditor"));
+
+// Helper to detect language from file path
+function detectLanguage(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() || "";
+  switch (ext) {
+    case "js": return "javascript";
+    case "jsx": return "jsx";
+    case "ts": return "typescript";
+    case "tsx": return "tsx";
+    case "json": return "json";
+    case "css": return "css";
+    case "html": return "html";
+    default: return "javascript";
+  }
+}
 
 const DEFAULT_FILES: Record<string, string> = {
   "/App.js": `export default function App() {
@@ -73,6 +91,27 @@ export default function Home() {
       }
     }
   }, [displayFiles, activeFile]);
+
+  // Handle code changes from the editor
+  const handleCodeChange = useCallback((newCode: string) => {
+    // Map the display file path back to the original file path
+    // For full project view, we need to update the source files
+    if (showFullProject) {
+      // Map /src/App.jsx -> /App.js, /src/components/X.jsx -> /components/X.js
+      let sourceFilePath = activeFile;
+      if (activeFile === "/src/App.jsx") {
+        sourceFilePath = "/App.js";
+      } else if (activeFile.startsWith("/src/components/")) {
+        sourceFilePath = activeFile.replace("/src/components/", "/components/").replace(".jsx", ".js");
+      } else {
+        // For config files, don't update source files
+        return;
+      }
+      setFiles(prev => ({ ...prev, [sourceFilePath]: newCode }));
+    } else {
+      setFiles(prev => ({ ...prev, [activeFile]: newCode }));
+    }
+  }, [activeFile, showFullProject]);
 
   const handleGenerate = async () => {
     if (!prompt.trim() || isLoading) return;
@@ -475,45 +514,77 @@ export default function Home() {
           <div className="flex-1 flex min-h-0">
             {/* File Explorer & Code Editor */}
             {showCode && (
-              <div className="w-[500px] flex flex-col border-r border-slate-200/80 bg-white">
-                {/* File Tabs Header */}
-                <div className="h-10 bg-slate-100 border-b border-slate-200 flex items-center justify-between px-3">
-                  <span className="text-xs font-medium text-slate-600">
-                    Project Files ({fileCount})
+              <div className="w-[520px] flex flex-col border-r border-[#3c3c3c] bg-[#1e1e1e]">
+                {/* Explorer Header */}
+                <div className="h-9 bg-[#252526] border-b border-[#3c3c3c] flex items-center justify-between px-3">
+                  <span className="text-xs font-medium text-[#cccccc] uppercase tracking-wider">
+                    Explorer
                   </span>
                   <button
                     onClick={() => setShowFullProject(!showFullProject)}
                     className={`text-xs px-2 py-1 rounded transition-colors ${
                       showFullProject
                         ? "bg-[#0078d4] text-white"
-                        : "bg-slate-200 text-slate-600 hover:bg-slate-300"
+                        : "bg-[#3c3c3c] text-[#cccccc] hover:bg-[#4c4c4c]"
                     }`}
                   >
                     {showFullProject ? "Full Project" : "Generated Only"}
                   </button>
                 </div>
-                {/* File Tabs */}
-                <div className="bg-slate-50 border-b border-slate-200 flex flex-wrap items-center px-2 py-1 gap-1 max-h-24 overflow-y-auto">
-                  {fileList.map((file) => (
-                    <button
-                      key={file}
-                      onClick={() => setActiveFile(file)}
-                      className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                        activeFile === file
-                          ? "bg-[#0078d4] text-white"
-                          : "text-slate-600 hover:text-slate-800 hover:bg-slate-200"
-                      }`}
-                    >
-                      {file.replace(/^\//, "").replace("src/", "")}
-                    </button>
-                  ))}
+                {/* File Tabs - VS Code style */}
+                <div className="bg-[#252526] border-b border-[#3c3c3c] flex items-center overflow-x-auto">
+                  {fileList.map((file) => {
+                    const fileName = file.replace(/^\//, "").replace("src/", "");
+                    const isActive = activeFile === file;
+                    const ext = file.split(".").pop() || "";
+
+                    // File icon colors based on extension
+                    const iconColor = {
+                      js: "#f7df1e",
+                      jsx: "#61dafb",
+                      ts: "#3178c6",
+                      tsx: "#3178c6",
+                      json: "#cbcb41",
+                      css: "#563d7c",
+                      html: "#e34c26",
+                    }[ext] || "#cccccc";
+
+                    return (
+                      <button
+                        key={file}
+                        onClick={() => setActiveFile(file)}
+                        className={`group flex items-center gap-1.5 px-3 py-2 text-xs font-medium whitespace-nowrap border-r border-[#3c3c3c] transition-colors ${
+                          isActive
+                            ? "bg-[#1e1e1e] text-white border-t-2 border-t-[#0078d4]"
+                            : "bg-[#2d2d2d] text-[#969696] hover:text-[#cccccc] hover:bg-[#2a2a2a]"
+                        }`}
+                        style={{ borderTopWidth: isActive ? "2px" : "0" }}
+                      >
+                        <span style={{ color: iconColor }}>
+                          {ext === "json" ? "{}" : ext === "html" ? "<>" : ext === "css" ? "#" : "JS"}
+                        </span>
+                        <span>{fileName}</span>
+                      </button>
+                    );
+                  })}
                 </div>
 
-                {/* Code Display */}
-                <div className="flex-1 overflow-auto p-4 bg-slate-900">
-                  <pre className="text-sm text-slate-300 font-mono whitespace-pre-wrap">
-                    <code>{displayFiles[activeFile] || "// Select a file to view"}</code>
-                  </pre>
+                {/* Code Editor */}
+                <div className="flex-1 overflow-hidden bg-[#1e1e1e]">
+                  <Suspense
+                    fallback={
+                      <div className="h-full flex items-center justify-center bg-[#1e1e1e]">
+                        <div className="text-slate-400 text-sm">Loading editor...</div>
+                      </div>
+                    }
+                  >
+                    <CodeEditor
+                      value={displayFiles[activeFile] || "// Select a file to view"}
+                      onChange={handleCodeChange}
+                      language={detectLanguage(activeFile)}
+                      readOnly={showFullProject && !activeFile.includes("/src/")}
+                    />
+                  </Suspense>
                 </div>
               </div>
             )}
