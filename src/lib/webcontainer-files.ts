@@ -144,7 +144,7 @@ export default {
             contents: `import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
-import './index.css'
+import './index.css'${customCSS ? "\nimport './App.css'" : ""}
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -158,9 +158,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             contents: `@tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-/* Custom styles */
-${customCSS}
 
 /* Base styles */
 * {
@@ -181,6 +178,13 @@ body {
             contents: fixImports(appContent),
           },
         },
+        ...(customCSS ? {
+          "App.css": {
+            file: {
+              contents: customCSS,
+            },
+          },
+        } : {}),
         components: {
           directory: componentsDir,
         },
@@ -213,6 +217,14 @@ function fixImports(code: string): string {
     /from ['"]\.\/components\/(\w+)\.js['"]/g,
     "from './components/$1.jsx'"
   );
+
+  // Remove App.css imports (we use index.css with Tailwind instead)
+  fixed = fixed.replace(/import ['"]\.\/App\.css['"];?\n?/g, "");
+  fixed = fixed.replace(/import ['"]\.\/app\.css['"];?\n?/g, "");
+  fixed = fixed.replace(/import ['"]\.\/styles\.css['"];?\n?/g, "");
+
+  // Remove any other CSS imports that might cause issues
+  fixed = fixed.replace(/import ['"]\.\/index\.css['"];?\n?/g, "");
 
   return fixed;
 }
@@ -296,7 +308,7 @@ export default {
     "/src/main.jsx": `import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.jsx'
-import './index.css'
+import './index.css'${customCSS ? "\nimport './App.css'" : ""}
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -305,9 +317,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 )`,
     "/src/index.css": `@tailwind base;
 @tailwind components;
-@tailwind utilities;
-
-${customCSS}`,
+@tailwind utilities;`,
     "/src/App.jsx": fixImports(appContent),
   };
 
@@ -320,6 +330,11 @@ ${customCSS}`,
         : fileName;
       expanded[`/src/components/${jsxFileName}`] = fixImports(content);
     }
+  }
+
+  // Add custom CSS file if provided (for editing in UI)
+  if (userFiles["/App.css"]) {
+    expanded["/src/App.css"] = userFiles["/App.css"];
   }
 
   return expanded;

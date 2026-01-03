@@ -5,58 +5,35 @@ interface Message {
   content: string;
 }
 
-const SYSTEM_PROMPT = `You are an expert React developer specializing in creating beautiful, production-ready UI components. Generate clean, modern React code based on the user's description.
+const SYSTEM_PROMPT = `You are an expert React developer and helpful assistant.
 
-CRITICAL: You must respond with ONLY a valid JSON object. No markdown, no explanations, no code blocks.
+IMPORTANT: First determine if the user wants CODE GENERATION or just a CHAT response.
 
-Response format:
-{
-  "files": {
-    "/App.js": "// complete component code here",
-    "/components/ComponentName.js": "// component code if needed"
-  },
-  "description": "Brief description of what was created/changed"
-}
+CODE GENERATION requests include: "create", "build", "make", "add", "update", "change", "modify", "fix" + component/feature descriptions.
+CHAT requests include: questions, explanations, "how to", "what is", "help with", general conversation.
 
-STRICT RULES:
-1. Use ONLY Tailwind CSS classes for styling - NO separate CSS files needed
-2. Use functional components with React hooks (useState, useEffect, useRef, etc.)
+FOR CODE GENERATION - Respond with JSON:
+{"type": "code", "files": {"/App.js": "code"}, "description": "brief description"}
+
+FOR CHAT/QUESTIONS - Respond with JSON:
+{"type": "chat", "message": "Your helpful response here"}
+
+CODE RULES (when generating code):
+1. Use Tailwind CSS for styling
+2. Functional components with hooks (useState, useEffect)
 3. Export each component as default
-4. Use plain JavaScript (JSX), NOT TypeScript
-5. NO external libraries except React
-6. Include realistic sample/mock data (names, prices, descriptions, etc.)
-7. For images, use these placeholder services:
-   - Products/general: https://picsum.photos/seed/{id}/400/300
-   - Avatars: https://ui-avatars.com/api/?name=John+Doe&background=random
-8. Make components visually stunning with:
-   - Gradients: bg-gradient-to-r, bg-gradient-to-br
-   - Shadows: shadow-sm, shadow-md, shadow-lg, shadow-xl
-   - Rounded corners: rounded-lg, rounded-xl, rounded-2xl
-   - Hover effects: hover:shadow-lg, hover:scale-105, hover:-translate-y-1
-   - Transitions: transition-all duration-200
-9. Use modern color palette: slate, blue, indigo, violet, emerald
-10. Ensure mobile-responsive design
+4. Plain JavaScript (JSX), not TypeScript
+5. No external libraries except React
+6. Include realistic mock data
+7. Images: https://picsum.photos/seed/{id}/400/300 or https://ui-avatars.com/api/?name=Name&background=random
+8. Modern design: gradients, shadows, rounded corners, hover effects, transitions
+9. Mobile-responsive
 
-IMPORTS RULES:
-- Always import hooks at the top: import { useState, useEffect } from 'react';
-- Component imports: import ComponentName from './components/ComponentName';
-- DO NOT use React.useState - use destructured imports
+IMPORTS: import { useState, useEffect } from 'react';
 
-FOLLOW-UP MODIFICATIONS:
-When the user asks to modify existing code:
-- Return the COMPLETE updated files, not just the changes
-- Maintain all existing functionality unless explicitly asked to remove it
-- Keep the same file structure unless changes are needed
-- Preserve existing styles and improve upon them
+For code follow-ups: Return ALL complete files.
 
-EXAMPLE for follow-up "make the button blue":
-If the current App.js has a red button, return the complete App.js with the button changed to blue.
-
-FILE STRUCTURE:
-- Simple components: Just /App.js
-- Complex apps: /App.js + /components/ComponentName.js for each component
-
-Remember: Return ONLY valid JSON. The response must be parseable by JSON.parse().`;
+ALWAYS respond with valid JSON only.`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -128,7 +105,25 @@ export async function POST(request: NextRequest) {
     }
 
     const data = await response.json();
+
+    // Check for truncation (finish_reason !== 'stop' means incomplete)
+    const finishReason = data.choices[0]?.finish_reason;
+    const wasLengthLimited = finishReason === 'length';
+
+    if (wasLengthLimited) {
+      console.warn("Response was truncated due to token limit");
+    }
+
     let content = data.choices[0].message.content || "";
+
+    // Log response stats for debugging
+    console.log("Response stats:", {
+      finishReason,
+      contentLength: content.length,
+      promptTokens: data.usage?.prompt_tokens,
+      completionTokens: data.usage?.completion_tokens,
+      totalTokens: data.usage?.total_tokens
+    });
 
     // Clean up the response
     content = content.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
@@ -139,23 +134,60 @@ export async function POST(request: NextRequest) {
       content = jsonMatch[0];
     }
 
+    // Fix template literals (backticks) used instead of quotes
+    // The LLM sometimes uses backticks for multiline strings which is invalid JSON
+    content = fixBackticksInJson(content);
+
+    // Fix unescaped newlines inside JSON strings
+    // The LLM sometimes returns multiline code inside JSON strings without proper escaping
+    content = fixJsonStringNewlines(content);
+
     // Parse JSON
     let result;
     try {
       result = JSON.parse(content);
     } catch (parseError) {
       console.error("JSON parse error:", parseError);
-      console.error("Content:", content.substring(0, 1000));
+      console.error("Content (first 1000 chars):", content.substring(0, 1000));
+      console.error("Content (last 500 chars):", content.substring(content.length - 500));
 
       // Try to fix common JSON issues
       try {
         // Sometimes the model adds trailing commas
-        const fixedContent = content
+        let fixedContent = content
           .replace(/,\s*}/g, "}")
           .replace(/,\s*]/g, "]");
+
+        // If response was truncated, try to close incomplete JSON
+        if (wasLengthLimited) {
+          // Check if we have a truncated file content
+          const lastQuoteIndex = fixedContent.lastIndexOf('"');
+          if (lastQuoteIndex > 0) {
+            // Try to close the JSON properly
+            const beforeLastQuote = fixedContent.substring(0, lastQuoteIndex + 1);
+            // Count open braces
+            const openBraces = (beforeLastQuote.match(/\{/g) || []).length;
+            const closeBraces = (beforeLastQuote.match(/\}/g) || []).length;
+            const needClosing = openBraces - closeBraces;
+
+            if (needClosing > 0) {
+              // Add description if missing and close braces
+              if (!beforeLastQuote.includes('"description"')) {
+                fixedContent = beforeLastQuote + ', "description": "Generated (response was truncated)"' + '}'.repeat(needClosing);
+              } else {
+                fixedContent = beforeLastQuote + '}'.repeat(needClosing);
+              }
+            }
+          }
+        }
+
         result = JSON.parse(fixedContent);
       } catch {
-        // Fallback error component
+        // Fallback error component with more details
+        const errorReason = wasLengthLimited
+          ? "The response was too long and got truncated. Try a simpler prompt."
+          : "There was an issue generating your component. Please try again.";
+
         result = {
           files: {
             "/App.js": `export default function App() {
@@ -164,26 +196,36 @@ export async function POST(request: NextRequest) {
       <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md text-center">
         <div className="text-6xl mb-4">⚠️</div>
         <h1 className="text-xl font-bold text-slate-900 mb-2">Generation Error</h1>
-        <p className="text-slate-500">There was an issue generating your component. Please try again with a different description.</p>
+        <p className="text-slate-500">${errorReason}</p>
       </div>
     </div>
   );
 }`,
           },
-          description: "Error generating component - please try again",
+          description: errorReason,
         };
       }
     }
 
+    // Check if this is a chat response or code response
+    if (result.type === "chat") {
+      return NextResponse.json({
+        type: "chat",
+        message: result.message || "I'm here to help!",
+      });
+    }
+
     // Process files - ensure proper React imports
     const processedFiles: Record<string, string> = {};
-    for (const [path, code] of Object.entries(result.files)) {
-      if (typeof code === "string" && path.endsWith(".js")) {
-        processedFiles[path] = normalizeReactImports(code);
+    if (result.files) {
+      for (const [path, code] of Object.entries(result.files)) {
+        if (typeof code === "string" && path.endsWith(".js")) {
+          processedFiles[path] = normalizeReactImports(code);
+        }
       }
     }
 
-    // Ensure App.js exists
+    // Ensure App.js exists for code responses
     if (!processedFiles["/App.js"]) {
       processedFiles["/App.js"] = `export default function App() {
   return (
@@ -195,6 +237,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json({
+      type: "code",
       files: processedFiles,
       description: result.description || "Generated successfully",
     });
@@ -207,6 +250,99 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+// Fix backticks used as string delimiters (convert to double quotes)
+function fixBackticksInJson(jsonStr: string): string {
+  // Replace backtick strings with double-quoted strings
+  // This handles cases where LLM uses template literals in JSON
+  let result = '';
+  let i = 0;
+
+  while (i < jsonStr.length) {
+    // Check if we're at a backtick that starts a string value
+    if (jsonStr[i] === '`') {
+      // Find the closing backtick
+      let j = i + 1;
+      let content = '';
+
+      while (j < jsonStr.length && jsonStr[j] !== '`') {
+        if (jsonStr[j] === '\\' && j + 1 < jsonStr.length) {
+          content += jsonStr[j] + jsonStr[j + 1];
+          j += 2;
+        } else {
+          content += jsonStr[j];
+          j++;
+        }
+      }
+
+      // Convert to double-quoted string with proper escaping
+      const escaped = content
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t');
+
+      result += '"' + escaped + '"';
+      i = j + 1;
+    } else {
+      result += jsonStr[i];
+      i++;
+    }
+  }
+
+  return result;
+}
+
+// Fix unescaped newlines inside JSON string values
+function fixJsonStringNewlines(jsonStr: string): string {
+  // This regex finds content between quotes that contains actual newlines
+  // and replaces those newlines with \n escape sequences
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < jsonStr.length; i++) {
+    const char = jsonStr[i];
+
+    if (escapeNext) {
+      result += char;
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      result += char;
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      result += char;
+      continue;
+    }
+
+    if (inString && char === '\n') {
+      result += '\\n';
+      continue;
+    }
+
+    if (inString && char === '\r') {
+      result += '\\r';
+      continue;
+    }
+
+    if (inString && char === '\t') {
+      result += '\\t';
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
 }
 
 function normalizeReactImports(code: string): string {
